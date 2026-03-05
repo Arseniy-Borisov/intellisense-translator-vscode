@@ -1,0 +1,27 @@
+# Node.js зависимости
+node_modules/
+
+# Скомпилированные файлы TypeScript
+out/
+*.js
+*.js.map
+
+# Локальные lock-файлы
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# VSCode настройки
+.vscode/
+
+# Пакеты VSCE
+*.vsix
+
+# Логи
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# MacOS / Linux временные файлы
+.DS_Store
+*.swp
