@@ -7,6 +7,10 @@
   "engines": {
     "vscode": "^1.100.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Arseniy-Borisov/intellisense-translator-vscode.git"
+  },  
   "categories": ["Other"],
   "activationEvents": [
     "onLanguage:javascript",
