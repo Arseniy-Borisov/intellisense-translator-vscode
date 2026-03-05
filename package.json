@@ -2,7 +2,7 @@
   "name": "intellisense-translator",
   "displayName": "IntelliSense Translator",
   "description": "Переводит hover‑подсказки через локальную модель Ollama ali6parmak/hy-mt1.5:1.8b. Работает только при наведении мышью. Подсказки при вводе с клавиатуры не поддерживаются в силу особенностей взаимодействия VSCode API и TSserver. Поддерживается 33 языка, по умолчанию выбран русский.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "Arseniy-Borisov",
   "engines": {
     "vscode": "^1.100.0"
@@ -13,6 +13,7 @@
   },  
   "categories": ["Other"],
   "activationEvents": [
+    "onStartupFinished",
     "onLanguage:javascript",
     "onLanguage:typescript"
   ],
