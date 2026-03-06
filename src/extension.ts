@@ -4,11 +4,20 @@ import axios from 'axios';
 
 const translationCache = new Map<string, string>();
 
-export type LanguageCode = | "zh" | "en" | "fr" | "pt" | "es" | "ja" | "tr" | "ru" | "ar" | "ko" | "th" | "it" | "de" | "vi" | "ms" | "id" | "tl" | "hi" | "zh-Hant" | "pl" | "cs" | "nl" | "km" | "my" | "fa" | "gu" | "ur" | "te" | "mr" | "he" | "bn" | "ta" | "uk" | "bo" | "kk" | "mn" | "ug" | "yue";
 
-const OLLAMA_ENDPOINT:string = process.env.OLLAMA_ENDPOINT ?? 'http://127.0.0.1:11434/api/generate';
-const OLLAMA_MODEL:string = process.env.OLLAMA_MODEL ?? 'ali6parmak/hy-mt1.5:1.8b'; //this model is better at 03.2026
-const TARGET_LANGUAGE: LanguageCode = (process.env.TARGET_LANGUAGE as LanguageCode) || "ru";
+const SUPPORTED_LANGUAGES = [
+  "Chinese","English","French","Portuguese","Spanish","Japanese","Turkish",
+  "Russian","Arabic","Korean","Thai","Italian","German","Vietnamese","Malay",
+  "Indonesian","Filipino","Hindi","Traditional Chinese","Polish","Czech","Dutch",
+  "Khmer","Burmese","Persian","Gujarati","Urdu","Telugu","Marathi","Hebrew",
+  "Bengali","Tamil","Ukrainian","Tibetan","Kazakh","Mongolian","Uyghur","Cantonese"
+] as const;
+// TypeScript автоматически создаёт тип SupportLanguages
+type SupportLanguages = (typeof SUPPORTED_LANGUAGES)[number];
+// Теперь массив и тип согласованы
+const supported: SupportLanguages[] = [...SUPPORTED_LANGUAGES];
+
+
 
 function docToString(doc: string | vscode.MarkdownString | vscode.MarkdownString | undefined): string {
     if (!doc) return '';
@@ -19,50 +28,55 @@ function docToString(doc: string | vscode.MarkdownString | vscode.MarkdownString
     return String(doc);
 }
 
-async function translateText(text: string) {
-    if (!text) return text;
-    if (translationCache.has(text)) return translationCache.get(text)!;
+async function translateText(
+  text: string,
+  targetLanguage: SupportLanguages,
+  endpoint: string,
+  model: string
+) {
+  if (!text) return text;
+  const cacheKey = `${text}||${targetLanguage}||${model}`;
+  if (translationCache.has(cacheKey)) return translationCache.get(cacheKey)!;
 
-    try {
-        //const prompt = `Translate the following documentation into Russian without changing code or identifiers:\n\n${text}`;
-        const prompt = `Translate the following segment into {${TARGET_LANGUAGE}}, without additional explanation.\n\n${text}`;
+  try {
+    const prompt = `Translate the following segment into {${targetLanguage}}, without additional explanation.\n\n${text}`;
 
-        const res = await axios.post(
-            OLLAMA_ENDPOINT,
-            { model: OLLAMA_MODEL, prompt, max_tokens: 512, stream: false },
-            { timeout: 12000 }
-        );
+    const res = await axios.post(
+      endpoint,
+      { model, prompt, max_tokens: 512, stream: false },
+      { timeout: 12000 }
+    );
 
-        let translated = '';
-        if (res.data) {
-            if (res.data.response) translated = String(res.data.response);
-            else if (res.data.completion) translated = String(res.data.completion);
-            else if (res.data.choices && res.data.choices[0]) {
-                translated = String(res.data.choices[0].text ?? res.data.choices[0].message?.content ?? '');
-            } else {
-                translated = String(res.data);
-            }
-        } else {
-            translated = String(res);
-        }
-
-        translated = translated.trim();
-        translationCache.set(text, translated);
-        return translated;
-    } catch (err) {
-        console.error('Translation error:', err);
-        return text;
+    let translated = '';
+    if (res.data) {
+      if (res.data.response) translated = String(res.data.response);
+      else if (res.data.completion) translated = String(res.data.completion);
+      else if (res.data.choices && res.data.choices[0]) {
+        translated = String(res.data.choices[0].text ?? res.data.choices[0].message?.content ?? '');
+      } else {
+        translated = String(res.data);
+      }
+    } else {
+      translated = String(res);
     }
+
+    translated = translated.trim();
+    translationCache.set(cacheKey, translated);
+    return translated;
+  } catch (err) {
+    console.error('Translation error:', err);
+    return text;
+  }
 }
 
 // Утилита: убирает пустые строки, нормализует, убирает дубликаты, возвращает массив уникальных блоков
-function uniqueBlocksFromArray(blocks: string[]): string[] {
+function uniqueBlocksFromArray(blocks: string[], TARGET_LANGUAGE: SupportLanguages): string[] {
     const seen = new Set<string>();
     const res: string[] = [];
     for (let b of blocks) {
         b = b.trim();
         if (!b) continue;
-        if (b.includes('**Перевод:**')) continue; // не берем уже переведённые блоки
+        if (b.includes(`**${TARGET_LANGUAGE}:**`)) continue; // не берем уже переведённые блоки
         if (!seen.has(b)) {
             seen.add(b);
             res.push(b);
@@ -87,144 +101,154 @@ function splitSignatureAndDoc(blocks: string[]): { sigs: string[]; doc: string |
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    const guard = { hover: false, completion: false, resolve: false };
+  const guard = { hover: false, completion: false, resolve: false };
+  const languages = ['javascript', 'typescript', 'typescriptreact', 'javascriptreact'];
 
-    const languages = ['javascript', 'typescript', 'typescriptreact', 'javascriptreact'];
+  // --- Переменные конфигурации и функция для их обновления ---
+  let OLLAMA_ENDPOINT: string;
+  let OLLAMA_MODEL: string;
+  let TARGET_LANGUAGE: SupportLanguages;
 
-    // Hover: запрашиваем hover от language server, но фильтруем блоки,
-    // убираем дубликаты и берём только основную документацию для перевода.
-    const hoverProvider: vscode.HoverProvider = {
-        async provideHover(document, position, token) {
-            if (guard.hover) return;
-            guard.hover = true;
-            try {
-                const hovs = await vscode.commands.executeCommand<vscode.Hover[]>(
-                    'vscode.executeHoverProvider',
-                    document.uri,
-                    position
-                );
-                if (!hovs || hovs.length === 0) return;
+  const loadConfig = () => {
+    const config = vscode.workspace.getConfiguration('intellisenseTranslator');
 
-                // Собираем все текстовые блоки из всех hover'ов
-                const rawBlocks: string[] = [];
-                for (const h of hovs) {
-                    for (const c of h.contents) {
-                        rawBlocks.push(docToString(c as any));
-                    }
-                }
+    OLLAMA_ENDPOINT = config.get<string>('ollamaEndpoint') ?? 'http://127.0.0.1:11434/api/generate';
+    OLLAMA_MODEL = config.get<string>('model') ?? 'ali6parmak/hy-mt1.5:1.8b';
+    const rawLang = config.get<string>('targetLanguage');
+    
 
-                const blocks = uniqueBlocksFromArray(rawBlocks);
-                if (blocks.length === 0) return;
+    TARGET_LANGUAGE = supported.includes(rawLang as SupportLanguages) ? (rawLang as SupportLanguages) : "Russian";
 
-                const { sigs, doc } = splitSignatureAndDoc(blocks);
-                if (!doc) return;
+    console.log('Loaded config:', { OLLAMA_ENDPOINT, OLLAMA_MODEL, TARGET_LANGUAGE });
+  };
 
-                // Если уже где-то есть наш перевод — ничего не делаем
-                if (doc.includes('**Перевод:**')) {
-                    // вернуть первый hover как есть, чтобы не ломать UX
-                    return hovs[0];
-                }
+  // Инициализация при запуске
+  loadConfig();
 
-                const translated = await translateText(doc);
+  // --- Следим за изменениями конфигурации ---
+  vscode.workspace.onDidChangeConfiguration(event => {
+    if (
+      event.affectsConfiguration('intellisenseTranslator.ollamaEndpoint') ||
+      event.affectsConfiguration('intellisenseTranslator.model') ||
+      event.affectsConfiguration('intellisenseTranslator.targetLanguage')
+    ) {
+      console.log('Config changed, reloading...');
+      loadConfig();
+      // Если нужно, здесь можно заново создать клиент OLLAMA или сбросить кэш
+    }
+  });
 
-                const md = new vscode.MarkdownString();
-                // сначала показываем сигнатуры / код (если были)
-                if (sigs.length) {
-                    //md.appendMarkdown(sigs.join('\n\n') + '\n\n');
-                }
-                // затем основную документацию
-                
-                // затем перевод
-                md.appendMarkdown('**Перевод:**\n' + translated);
-                md.isTrusted = false;
+  // --- Hover Provider ---
+  const hoverProvider: vscode.HoverProvider = {
+    async provideHover(document, position, token) {
+      if (guard.hover) return;
+      guard.hover = true;
+      try {
+        const hovs = await vscode.commands.executeCommand<vscode.Hover[]>(
+          'vscode.executeHoverProvider',
+          document.uri,
+          position
+        );
+        if (!hovs || hovs.length === 0) return;
 
-                return new vscode.Hover(md);
-            } finally {
-                guard.hover = false;
-            }
+        const rawBlocks: string[] = [];
+        for (const h of hovs) {
+          for (const c of h.contents) {
+            rawBlocks.push(docToString(c as any));
+          }
         }
-    };
 
-    // Completion: получаем items от executeCompletionItemProvider, но для каждого item
-    // выбираем уникальные блоки документации, берём основной и переводим только его.
-    const completionProvider: vscode.CompletionItemProvider = {
-        async provideCompletionItems(document, position, token, context) {
-            if (guard.completion) return undefined;
-            guard.completion = true;
-            try {
-                const raw = await vscode.commands.executeCommand<any>(
-                    'vscode.executeCompletionItemProvider',
-                    document.uri,
-                    position
-                );
-                if (!raw || !raw.items) return undefined;
+        const blocks = uniqueBlocksFromArray(rawBlocks, TARGET_LANGUAGE);
+        if (blocks.length === 0) return;
 
-                const items: vscode.CompletionItem[] = raw.items;
+        const { sigs, doc } = splitSignatureAndDoc(blocks);
+        if (!doc) return;
+        if (doc.includes(`**${TARGET_LANGUAGE}:**`)) return hovs[0];
 
-                for (const item of items) {
-                    // Получаем текст и разбиваем на логические блоки по двойному переносу строки
-                    const full = docToString(item.documentation).trim();
-                    if (!full) continue;
-                    if (full.includes('**Перевод:**')) continue;
+        const translated = await translateText(doc, TARGET_LANGUAGE, OLLAMA_ENDPOINT, OLLAMA_MODEL);
 
-                    // Разобьем на блоки: разделителем считаем два перевода строки
-                    // это аккуратно отделит сигнатуры/код и параграфы
-                    const candidateBlocks = full.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
-                    const blocks = uniqueBlocksFromArray(candidateBlocks);
-                    if (blocks.length === 0) continue;
+        const md = new vscode.MarkdownString();
+        md.appendMarkdown(`**${TARGET_LANGUAGE}:**\n` + translated);
+        md.isTrusted = false;
 
-                    const { sigs, doc } = splitSignatureAndDoc(blocks);
-                    if (!doc) continue;
+        return new vscode.Hover(md);
+      } finally {
+        guard.hover = false;
+      }
+    }
+  };
 
-                    const translated = await translateText(doc);
+  // --- Completion Provider ---
+  const completionProvider: vscode.CompletionItemProvider = {
+    async provideCompletionItems(document, position, token, context) {
+      if (guard.completion) return undefined;
+      guard.completion = true;
+      try {
+        const raw = await vscode.commands.executeCommand<any>(
+          'vscode.executeCompletionItemProvider',
+          document.uri,
+          position
+        );
+        if (!raw || !raw.items) return undefined;
 
-                    const md = new vscode.MarkdownString();
-                    if (sigs.length) //md.appendMarkdown(sigs.join('\n\n') + '\n\n');
-                    
-                    md.appendMarkdown('**Перевод:**\n' + translated);
-                    md.isTrusted = false;
+        const items: vscode.CompletionItem[] = raw.items;
 
-                    item.documentation = md;
-                }
+        for (const item of items) {
+          const full = docToString(item.documentation).trim();
+          if (!full || full.includes(`**${TARGET_LANGUAGE}:**`)) continue;
 
-                return new vscode.CompletionList(items, raw.isIncomplete === true);
-            } finally {
-                guard.completion = false;
-            }
-        },
+          const candidateBlocks = full.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+          const blocks = uniqueBlocksFromArray(candidateBlocks, TARGET_LANGUAGE);
+          if (!blocks.length) continue;
 
-        async resolveCompletionItem(item: vscode.CompletionItem, token: vscode.CancellationToken) {
-            if (guard.resolve) return item;
-            guard.resolve = true;
-            try {
-                const full = docToString(item.documentation).trim();
-                if (!full || full.includes('**Перевод:**')) return item;
+          const { sigs, doc } = splitSignatureAndDoc(blocks);
+          if (!doc) continue;
 
-                const candidateBlocks = full.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
-                const blocks = uniqueBlocksFromArray(candidateBlocks);
-                if (blocks.length === 0) return item;
+          const translated = await translateText(doc, TARGET_LANGUAGE, OLLAMA_ENDPOINT, OLLAMA_MODEL);
 
-                const { sigs, doc } = splitSignatureAndDoc(blocks);
-                if (!doc) return item;
+          const md = new vscode.MarkdownString();
+          md.appendMarkdown(`**${TARGET_LANGUAGE}:**\n` + translated);
+          md.isTrusted = false;
 
-                const translated = await translateText(doc);
-
-                const md = new vscode.MarkdownString();
-                if (sigs.length) //md.appendMarkdown(sigs.join('\n\n') + '\n\n');
-                
-                md.appendMarkdown('**Перевод:**\n' + translated);
-                md.isTrusted = false;
-
-                item.documentation = md;
-                return item;
-            } finally {
-                guard.resolve = false;
-            }
+          item.documentation = md;
         }
-    };
 
-    context.subscriptions.push(vscode.languages.registerHoverProvider(languages, hoverProvider));
-    context.subscriptions.push(vscode.languages.registerCompletionItemProvider(languages, completionProvider));
+        return new vscode.CompletionList(items, raw.isIncomplete === true);
+      } finally {
+        guard.completion = false;
+      }
+    },
+
+    async resolveCompletionItem(item: vscode.CompletionItem, token: vscode.CancellationToken) {
+      if (guard.resolve) return item;
+      guard.resolve = true;
+      try {
+        const full = docToString(item.documentation).trim();
+        if (!full || full.includes(`**${TARGET_LANGUAGE}:**`)) return item;
+
+        const candidateBlocks = full.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+        const blocks = uniqueBlocksFromArray(candidateBlocks, TARGET_LANGUAGE);
+        if (!blocks.length) return item;
+
+        const { sigs, doc } = splitSignatureAndDoc(blocks);
+        if (!doc) return item;
+
+        const translated = await translateText(doc, TARGET_LANGUAGE, OLLAMA_ENDPOINT, OLLAMA_MODEL);
+
+        const md = new vscode.MarkdownString();
+        md.appendMarkdown(`**${TARGET_LANGUAGE}:**\n` + translated);
+        md.isTrusted = false;
+
+        item.documentation = md;
+        return item;
+      } finally {
+        guard.resolve = false;
+      }
+    }
+  };
+
+  context.subscriptions.push(vscode.languages.registerHoverProvider(languages, hoverProvider));
+  context.subscriptions.push(vscode.languages.registerCompletionItemProvider(languages, completionProvider));
 }
 
 export function deactivate() {}
